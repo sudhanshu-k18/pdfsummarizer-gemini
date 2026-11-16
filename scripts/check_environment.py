@@ -12,6 +12,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -91,6 +92,25 @@ def gemini_request(path: str, api_key: str, payload: dict | None = None, timeout
         raise RuntimeError(f"HTTP {exc.code}: {message}") from exc
 
 
+def gemini_request_with_retries(
+    path: str, api_key: str, payload: dict | None = None, attempts: int = 3
+):
+    """Retry transient load errors (429/500/503) with a short backoff."""
+    last_error: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return gemini_request(path, api_key, payload)
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+            message = str(exc)
+            transient = any(code in message for code in ("HTTP 429", "HTTP 500", "HTTP 503"))
+            if attempt < attempts and transient:
+                time.sleep(attempt * 3)
+                continue
+            raise
+    raise last_error  # pragma: no cover
+
+
 def check_gemini() -> None:
     api_key = clean(os.getenv("GEMINI_API_KEY"))
     report(bool(api_key), "GEMINI_API_KEY set")
@@ -98,7 +118,7 @@ def check_gemini() -> None:
         return
 
     try:
-        data = gemini_request("models", api_key)
+        data = gemini_request_with_retries("models", api_key)
     except Exception as exc:  # noqa: BLE001
         report(False, "Gemini API key accepted", str(exc))
         return
@@ -117,7 +137,7 @@ def check_gemini() -> None:
     report(True, "Configured model available", model)
 
     try:
-        data = gemini_request(
+        data = gemini_request_with_retries(
             f"models/{model}:generateContent",
             api_key,
             {"contents": [{"parts": [{"text": "Reply with exactly: OK"}]}]},
